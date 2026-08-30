@@ -100,13 +100,13 @@ async def admin_reset(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "room": room})
 
 
-mcp_app = mcp.http_app(path="/", stateless_http=True, allowed_hosts=["*"])
+mcp_app = mcp.http_app(path="/mcp", stateless_http=True, allowed_hosts=["*"])
 
 app = Starlette(
     routes=[
         Route("/health", health),
         Route("/admin/reset/{room}", admin_reset, methods=["POST"]),
-        Mount("/mcp", app=mcp_app),
+        Mount("/", app=mcp_app),  # serves /mcp exactly, no trailing-slash redirect
     ],
     lifespan=mcp_app.lifespan,
 )
