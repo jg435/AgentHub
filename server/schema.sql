@@ -56,3 +56,4 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_room_id ON events(room, id);
+CREATE INDEX IF NOT EXISTS agents_room_active ON agents(room, active);

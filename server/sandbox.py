@@ -14,6 +14,8 @@ WORKSPACE = "/workspace"
 IMAGE = os.environ.get("SANDBOX_IMAGE", "python:3.12-slim")
 SEED_DIR = Path(__file__).resolve().parent.parent / "seed"
 EXEC_TIMEOUT_S = 120
+NOISE = {"__pycache__", ".pytest_cache", ".git", "node_modules", ".venv"}
+SEED_SKIP = {"tasks.json"}  # server-side seed data, not part of the project
 _client: Daytona | None = None
 _cache: dict[str, object] = {}  # sandbox_id -> Sandbox handle
 FAKE = os.environ.get("SANDBOX_FAKE") == "1"  # in-memory sandbox for the simulation suite
@@ -31,7 +33,8 @@ class _FakeSandbox:
         self.id = sid
         self.files = _fake_fs.setdefault(sid, {
             f.relative_to(SEED_DIR).as_posix(): f.read_text()
-            for f in SEED_DIR.rglob("*") if f.is_file() and "__pycache__" not in f.parts})
+            for f in SEED_DIR.rglob("*")
+            if f.is_file() and not (set(f.parts) & NOISE) and f.name not in SEED_SKIP})
 
 
 def destroy(sandbox_id: str) -> None:
@@ -95,7 +98,8 @@ def create_for_room(room: str) -> str:
     try:
         files = [
             FileUpload(source=f.read_bytes(), destination=f"{WORKSPACE}/{f.relative_to(SEED_DIR).as_posix()}")
-            for f in SEED_DIR.rglob("*") if f.is_file() and "__pycache__" not in f.parts
+            for f in SEED_DIR.rglob("*")
+            if f.is_file() and not (set(f.parts) & NOISE) and f.name not in SEED_SKIP
         ]
         sb.fs.upload_files(files, timeout=120)
         r = sb.process.exec(
@@ -133,27 +137,38 @@ def get(sandbox_id: str | None):
 # --------------------------------------------------------------------------
 
 def list_files(sandbox_id: str | None, rel_dir: str) -> list[dict]:
+    """Two levels deep (ported from the Codex branch), so one call shows the repo shape."""
     full = safe_path(rel_dir or ".")
     sb = get(sandbox_id)
     if FAKE:
         prefix = "" if full == WORKSPACE else posixpath.relpath(full, WORKSPACE) + "/"
-        names = {p[len(prefix):].split("/")[0] for p in sb.files if p.startswith(prefix)}
-        return sorted(({"path": prefix + n, "size": None,
-                        "is_dir": any(p.startswith(prefix + n + "/") for p in sb.files)} for n in names),
-                      key=lambda x: (not x["is_dir"], x["path"]))
+        seen: dict[str, bool] = {}
+        for p in sb.files:
+            if not p.startswith(prefix):
+                continue
+            parts = p[len(prefix):].split("/")
+            for depth in (1, 2):
+                if len(parts) >= depth:
+                    sub = prefix + "/".join(parts[:depth])
+                    seen[sub] = seen.get(sub, False) or len(parts) > depth
+        return sorted(({"path": k, "is_dir": v, "size": None} for k, v in seen.items()),
+                      key=lambda x: (x["path"].count("/"), not x["is_dir"], x["path"]))
     try:
-        infos = sb.fs.list_files(full, request_timeout=30)
+        infos = sb.fs.list_files(full, depth=2, request_timeout=30)
     except Exception as e:
         raise SandboxError(f"list_files {rel_dir!r} failed: {e}") from e
     out = []
     for i in infos:
-        name = getattr(i, "name", None) or str(i)
+        abs_path = getattr(i, "path", None) or posixpath.join(full, getattr(i, "name", str(i)))
+        if not abs_path.startswith("/"):
+            abs_path = posixpath.join(full, abs_path)
         out.append({
-            "path": posixpath.relpath(posixpath.join(full, name), WORKSPACE),
+            "path": posixpath.relpath(abs_path, WORKSPACE),
             "is_dir": bool(getattr(i, "is_dir", False)),
             "size": getattr(i, "size", None),
         })
-    return sorted(out, key=lambda x: (not x["is_dir"], x["path"]))
+    out = [o for o in out if not any(seg in NOISE for seg in o["path"].split("/"))]
+    return sorted(out, key=lambda x: (x["path"].count("/"), not x["is_dir"], x["path"]))
 
 
 def read_file(sandbox_id: str | None, rel_path: str) -> str:

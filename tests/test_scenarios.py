@@ -16,6 +16,12 @@ def _task(agent, title="task", files=None):
     return agent.call("create_task", title=title, description="", suggested_files=files or [])["task_id"]
 
 
+def _claimed(agent, title="task"):
+    tid = _task(agent, title)
+    assert agent.call("claim_task", task_id=tid)["granted"]
+    return tid
+
+
 # ---- S3 / S4: races (run first, 50x) ------------------------------------
 
 @pytest.mark.parametrize("i", range(50))
@@ -40,10 +46,12 @@ def test_s3_claim_race(agents, i):
 @pytest.mark.parametrize("i", range(50))
 def test_s4_lease_race(agents, i):
     a, b = agents("A"), agents("B")
+    ta, tb = _task(a, "ta"), _task(b, "tb")
+    a.call("claim_task", task_id=ta); b.call("claim_task", task_id=tb)
     results = {}
 
     def go(ag, key):
-        results[key] = ag.call("acquire_lease", paths=["src/auth.py"], task_id=None)
+        results[key] = ag.call("acquire_lease", paths=["src/auth.py"], task_id={"a": ta, "b": tb}[key])
 
     ts = [threading.Thread(target=go, args=(a, "a")), threading.Thread(target=go, args=(b, "b"))]
     [t.start() for t in ts]
@@ -113,19 +121,40 @@ def test_s5_write_without_lease(agents):
 
 def test_s6_lease_expiry(agents, sql, room):
     a, b = agents("A"), agents("B")
-    assert a.call("acquire_lease", paths=["src/auth.py"])["granted"]
+    ta, tb = _claimed(a), _claimed(b)
+    assert a.call("acquire_lease", paths=["src/auth.py"], task_id=ta)["granted"]
     sql("UPDATE leases SET expires_at=? WHERE room=? AND path='src/auth.py'", time.time() - 1, room)
-    assert b.call("acquire_lease", paths=["src/auth.py"])["granted"]
+    assert b.call("acquire_lease", paths=["src/auth.py"], task_id=tb)["granted"]
     kinds = [e["kind"] for e in b.call("get_board")["recent_events"]]
     assert "lease_expired" in kinds
 
 
 def test_lease_all_or_nothing(agents):
     a, b = agents("A"), agents("B")
-    assert a.call("acquire_lease", paths=["a.py"])["granted"]
-    d = b.call("acquire_lease", paths=["b.py", "a.py"])
+    ta, tb = _claimed(a), _claimed(b)
+    assert a.call("acquire_lease", paths=["a.py"], task_id=ta)["granted"]
+    d = b.call("acquire_lease", paths=["b.py", "a.py"], task_id=tb)
     assert d["granted"] is False
     assert b.call("get_board")["leases"][0]["path"] == "a.py"  # b.py was NOT granted
+
+
+def test_lease_requires_claimed_task(agents):
+    """Ported from the Codex branch: no lease without a task you hold."""
+    a = agents("A")
+    d = a.call("acquire_lease", paths=["x.py"])
+    assert d["granted"] is False and "claim_task" in d["denials"][0]["message"]
+    tid = _task(a, "unclaimed")
+    d = a.call("acquire_lease", paths=["x.py"], task_id=tid)
+    assert d["granted"] is False
+    a.call("claim_task", task_id=tid)
+    assert a.call("acquire_lease", paths=["x.py"], task_id=tid)["granted"]
+    assert a.call("get_board")["leases"] != []
+
+
+def test_list_files_is_two_levels_deep(agents):
+    a = agents("A")
+    paths = {e["path"] for e in a.call("list_files", dir=".")["entries"]}
+    assert {"app", "tests", "app/main.py", "tests/test_todos.py"} <= paths
 
 
 def test_write_renews_lease_and_logs(agents, room, sql):

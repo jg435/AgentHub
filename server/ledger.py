@@ -156,6 +156,15 @@ def acquire_lease(conn, room: str, agent_id: str, paths: list[str], task_id: int
     """All-or-nothing. Raises Denied (rolling the tx back) if any path is held
     by someone else. INSERT ... ON CONFLICT DO UPDATE ... WHERE expired-or-mine
     means two simultaneous acquires produce exactly one winner."""
+    # Ported from the Codex branch: a lease must belong to a task you have claimed,
+    # so agents cannot lock files for work nobody can see on the board.
+    if task_id is None or conn.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND room=? AND claimed_by=? AND status='claimed'",
+            (task_id, room, agent_id)).fetchone() is None:
+        raise Denied({"granted": False, "denials": [{
+            "path": p, "held_by": None, "task_id": task_id,
+            "message": (f"DENIED: you must claim a task before leasing {p}. Call claim_task on an "
+                        f"open task from the board, then acquire_lease with that task_id.")} for p in paths]})
     expire_leases(conn, room)  # lazy expiry; emits lease_expired
     t = db.now()
     expires = t + LEASE_TTL_S

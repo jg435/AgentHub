@@ -11,6 +11,8 @@ task ledger, not git branches. See `SPEC.md`.
 `wait_for_event`, `log_work`, `post_update`.
 **Phase 3** — spectator UI at `/ui/{room}` polling `GET /api/board/{room}` every 500 ms.
 New rooms are seeded with the tasks in `seed/tasks.json` (`SEED_TASKS=0` disables).
+**Combined** — ported from the parallel Codex build (see `docs/PARALLEL-BUILD-STORY.md`):
+`acquire_lease` requires a task you have claimed; `list_files` returns a two-level tree.
 
 ## Tests
 
