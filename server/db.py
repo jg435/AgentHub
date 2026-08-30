@@ -30,6 +30,10 @@ def init_schema() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        # migration for DBs created before suggested_files existed
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "suggested_files" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN suggested_files TEXT")
     finally:
         conn.close()
 

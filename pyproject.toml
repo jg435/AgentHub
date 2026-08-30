@@ -9,3 +9,9 @@ dependencies = [
     "starlette>=1.6.0",
     "uvicorn[standard]>=0.52.4",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "requests>=2.34.2",
+]

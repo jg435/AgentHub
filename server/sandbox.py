@@ -16,10 +16,30 @@ SEED_DIR = Path(__file__).resolve().parent.parent / "seed"
 EXEC_TIMEOUT_S = 120
 _client: Daytona | None = None
 _cache: dict[str, object] = {}  # sandbox_id -> Sandbox handle
+FAKE = os.environ.get("SANDBOX_FAKE") == "1"  # in-memory sandbox for the simulation suite
+_fake_fs: dict[str, dict[str, str]] = {}
 
 
 class SandboxError(Exception):
     pass
+
+
+class _FakeSandbox:
+    """Just enough of the Daytona surface for the ledger tests (no Daytona calls)."""
+
+    def __init__(self, sid: str):
+        self.id = sid
+        self.files = _fake_fs.setdefault(sid, {
+            f.relative_to(SEED_DIR).as_posix(): f.read_text()
+            for f in SEED_DIR.rglob("*") if f.is_file() and "__pycache__" not in f.parts})
+
+
+def destroy(sandbox_id: str) -> None:
+    _cache.pop(sandbox_id, None)
+    if FAKE:
+        _fake_fs.pop(sandbox_id, None)
+        return
+    _daytona().get(sandbox_id, request_timeout=30).delete()
 
 
 def _daytona() -> Daytona:
@@ -58,6 +78,10 @@ def safe_path(path: str) -> str:
 
 def create_for_room(room: str) -> str:
     """Create a sandbox, seed /workspace, install deps. Returns sandbox id."""
+    if FAKE:
+        sid = f"fake-{room}"
+        _cache[sid] = _FakeSandbox(sid)
+        return sid
     try:
         sb = _daytona().create(
             CreateSandboxFromImageParams(
@@ -90,6 +114,8 @@ def get(sandbox_id: str | None):
     if not sandbox_id:
         raise SandboxError("this room has no sandbox; join_room should have created one")
     sb = _cache.get(sandbox_id)
+    if FAKE:
+        return sb or _cache.setdefault(sandbox_id, _FakeSandbox(sandbox_id))
     try:
         if sb is None:
             sb = _daytona().get(sandbox_id, request_timeout=30)
@@ -109,6 +135,12 @@ def get(sandbox_id: str | None):
 def list_files(sandbox_id: str | None, rel_dir: str) -> list[dict]:
     full = safe_path(rel_dir or ".")
     sb = get(sandbox_id)
+    if FAKE:
+        prefix = "" if full == WORKSPACE else posixpath.relpath(full, WORKSPACE) + "/"
+        names = {p[len(prefix):].split("/")[0] for p in sb.files if p.startswith(prefix)}
+        return sorted(({"path": prefix + n, "size": None,
+                        "is_dir": any(p.startswith(prefix + n + "/") for p in sb.files)} for n in names),
+                      key=lambda x: (not x["is_dir"], x["path"]))
     try:
         infos = sb.fs.list_files(full, request_timeout=30)
     except Exception as e:
@@ -127,6 +159,11 @@ def list_files(sandbox_id: str | None, rel_dir: str) -> list[dict]:
 def read_file(sandbox_id: str | None, rel_path: str) -> str:
     full = safe_path(rel_path)
     sb = get(sandbox_id)
+    if FAKE:
+        rel = posixpath.relpath(full, WORKSPACE)
+        if rel not in sb.files:
+            raise SandboxError(f"read_file {rel_path!r}: no such file")
+        return sb.files[rel]
     try:
         data = sb.fs.download_file(full)
     except Exception as e:
@@ -139,6 +176,9 @@ def read_file(sandbox_id: str | None, rel_path: str) -> str:
 def write_file(sandbox_id: str | None, rel_path: str, content: str) -> int:
     full = safe_path(rel_path)
     sb = get(sandbox_id)
+    if FAKE:
+        sb.files[posixpath.relpath(full, WORKSPACE)] = content
+        return len(content)
     try:
         parent = posixpath.dirname(full)
         if parent != WORKSPACE:
@@ -152,6 +192,8 @@ def write_file(sandbox_id: str | None, rel_path: str, content: str) -> int:
 def run(sandbox_id: str | None, command: str) -> dict:
     """Run a shell command in /workspace. Returns {stdout, stderr, exit_code}."""
     sb = get(sandbox_id)
+    if FAKE:
+        return {"stdout": f"[fake sandbox] {command}\n", "stderr": "", "exit_code": 0}
     # Daytona's exec returns combined output; split stderr out via a temp file.
     wrapped = (
         f"cd {WORKSPACE} && ( {command} ) 2>/tmp/.agenthub_stderr; rc=$?; "

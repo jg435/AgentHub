@@ -1,4 +1,4 @@
-"""Shared agent workspace — MCP server (Phase 0: join_room + get_board)."""
+"""Shared agent workspace — MCP server + plain-HTTP shim for the simulator."""
 import os
 import uuid
 
@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
-from . import db, sandbox
+from . import db, ledger, sandbox
 from .board import board, board_delta, reap, expire_leases, recent_events, resume_briefing
 
 PROTOCOL = (
@@ -24,28 +24,20 @@ PROTOCOL = (
     "inherits your notes), post_update when finished or blocked, and call handoff before "
     "you stop. Every response includes board_delta: read it, it is what the others did."
 )
-
 DEFAULT_BRIEF = "FastAPI todo service at the workspace root (app/main.py). Tests: pytest -q"
 
 
 def _room_of(conn, agent_id: str) -> tuple[str, str | None]:
-    """(room, sandbox_id) for an agent, or a clear error."""
-    r = conn.execute(
-        "SELECT a.room, r.sandbox_id FROM agents a JOIN rooms r ON r.id=a.room WHERE a.id=?",
-        (agent_id,)).fetchone()
-    if r is None:
-        raise ValueError(f"unknown agent_id {agent_id!r}; call join_room first")
-    return r["room"], r["sandbox_id"]
+    a = ledger.agent_row(conn, agent_id)
+    return a["room"], a["sandbox_id"]
 
 
-mcp = FastMCP(
-    "agenthub",
-    instructions="Shared agent workspace. Call join_room first; every response carries "
-                 "board_delta with what other agents did since your last call.",
-)
+# ==========================================================================
+# tool handlers — plain functions wrapped by @board_delta; registered with
+# FastMCP below AND exposed over POST /tools/{name} for the simulator, so
+# both paths exercise exactly this code.
+# ==========================================================================
 
-
-@mcp.tool()
 @board_delta
 def join_room(room: str, agent_name: str, agent_kind: str) -> dict:
     """Join (or create) a shared workspace room. Call this FIRST. Returns your agent_id,
@@ -97,15 +89,11 @@ def join_room(room: str, agent_name: str, agent_kind: str) -> dict:
     }
 
 
-@mcp.tool()
 @board_delta
 def get_board(agent_id: str) -> dict:
     """Current state of the room: tasks, live leases, agents, recent events."""
     with db.tx() as conn:
-        a = conn.execute("SELECT room FROM agents WHERE id=?", (agent_id,)).fetchone()
-        if a is None:
-            raise ValueError(f"unknown agent_id {agent_id!r}; call join_room first")
-        room = a["room"]
+        room, _ = _room_of(conn, agent_id)
         reap(conn, room)
         expire_leases(conn, room)
         b = board(conn, room)
@@ -113,7 +101,53 @@ def get_board(agent_id: str) -> dict:
     return b
 
 
-@mcp.tool()
+@board_delta
+def create_task(agent_id: str, title: str, description: str = "", suggested_files: list[str] | None = None) -> dict:
+    """Add a task to the board. suggested_files lists the paths it will likely touch."""
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        task_id = ledger.create_task(conn, room, agent_id, title, description, suggested_files or [])
+    return {"task_id": task_id}
+
+
+@board_delta
+def claim_task(agent_id: str, task_id: int) -> dict:
+    """Claim an open task. Atomic: first caller wins. On success returns the task and its
+    worklog — the notes previous agents left on it are your inherited context."""
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        return ledger.claim_task(conn, room, agent_id, task_id)
+
+
+@board_delta
+def acquire_lease(agent_id: str, paths: list[str], task_id: int | None = None) -> dict:
+    """Lease files before writing them. All-or-nothing. Leases last 300s and renew on
+    every write. If denied, READ the denial: it names the holder and suggests other work."""
+    try:
+        with db.tx() as conn:
+            room, _ = _room_of(conn, agent_id)
+            for p in paths:
+                sandbox.safe_path(p)
+            return ledger.acquire_lease(conn, room, agent_id, list(paths), task_id)
+    except ledger.Denied as d:
+        with db.tx() as conn:
+            room, _ = _room_of(conn, agent_id)
+            for den in d.payload["denials"]:
+                db.emit(conn, room, agent_id, "lease_denied",
+                        {"path": den["path"], "held_by": den["held_by"], "task_id": task_id})
+        return d.payload
+    except sandbox.SandboxError as e:
+        raise ValueError(str(e)) from e
+
+
+@board_delta
+def release_lease(agent_id: str, paths: list[str]) -> dict:
+    """Release leases you hold. Do this when the task is done."""
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        return ledger.release_lease(conn, room, agent_id, list(paths))
+
+
 @board_delta
 def list_files(agent_id: str, dir: str = ".") -> dict:
     """List files in a directory of the shared workspace (relative to its root)."""
@@ -125,7 +159,6 @@ def list_files(agent_id: str, dir: str = ".") -> dict:
         raise ValueError(str(e)) from e
 
 
-@mcp.tool()
 @board_delta
 def read_file(agent_id: str, path: str) -> dict:
     """Read a file from the shared workspace. No lease needed for reads."""
@@ -137,22 +170,33 @@ def read_file(agent_id: str, path: str) -> dict:
         raise ValueError(str(e)) from e
 
 
-@mcp.tool()
 @board_delta
 def write_file(agent_id: str, path: str, content: str) -> dict:
-    """Write (create or overwrite) a file in the shared workspace."""
+    """Write (create or overwrite) a file in the shared workspace. REQUIRES a live lease
+    on the path held by you (acquire_lease first). Renews the lease on success."""
+    try:
+        sandbox.safe_path(path)
+    except sandbox.SandboxError as e:
+        raise ValueError(str(e)) from e
     with db.tx() as conn:
         room, sandbox_id = _room_of(conn, agent_id)
+        denial = ledger.check_and_renew_lease(conn, room, agent_id, path)
+        if denial:
+            db.emit(conn, room, agent_id, "lease_denied",
+                    {"path": path, "held_by": denial["denials"][0].get("held_by"), "on": "write_file"})
+            return denial
     try:
         size = sandbox.write_file(sandbox_id, path, content)
     except sandbox.SandboxError as e:
         raise ValueError(str(e)) from e
     with db.tx() as conn:
         db.emit(conn, room, agent_id, "file_written", {"path": path, "bytes": size})
+        tid = ledger.claimed_task_id(conn, room, agent_id)
+        if tid:
+            ledger.add_worklog(conn, tid, agent_id, f"wrote {path} ({size} bytes)")
     return {"ok": True, "path": path, "bytes": size}
 
 
-@mcp.tool()
 @board_delta
 def run(agent_id: str, command: str) -> dict:
     """Run a shell command in the shared workspace (cwd = workspace root).
@@ -168,15 +212,94 @@ def run(agent_id: str, command: str) -> dict:
             "command": command, "exit_code": result["exit_code"],
             "stdout": result["stdout"][:4000], "stderr": result["stderr"][:4000],
         })
+        tid = ledger.claimed_task_id(conn, room, agent_id)
+        if tid:
+            ledger.add_worklog(conn, tid, agent_id, f"ran `{command}` -> exit {result['exit_code']}")
     return result
 
 
+@board_delta
+def log_work(agent_id: str, task_id: int, note: str) -> dict:
+    """Append a note to a task's worklog. Write it for someone who wasn't here."""
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        if ledger.task_row(conn, room, task_id) is None:
+            raise ValueError(f"task #{task_id} does not exist in this room")
+        ledger.add_worklog(conn, task_id, agent_id, note)
+    return {"ok": True, "task_id": task_id}
+
+
+@board_delta
+def post_update(agent_id: str, kind: str, message: str, task_id: int | None = None) -> dict:
+    """Post a structured update. kind: note | blocked | done. With task_id, 'done' marks
+    your claimed task done and 'blocked' marks it blocked."""
+    if kind not in ("note", "blocked", "done"):
+        raise ValueError("kind must be one of: note, blocked, done")
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        if task_id is None and kind in ("done", "blocked"):
+            task_id = ledger.claimed_task_id(conn, room, agent_id)
+        changed = False
+        if task_id is not None and kind in ("done", "blocked"):
+            changed = ledger.set_task_status(conn, room, agent_id, task_id, kind, message)
+            if not changed:
+                raise ValueError(f"task #{task_id} is not claimed by you, so you cannot mark it {kind}")
+        else:
+            db.emit(conn, room, agent_id, "update_posted", {"kind": kind, "message": message, "task_id": task_id})
+            if task_id is not None:
+                ledger.add_worklog(conn, task_id, agent_id, f"[{kind}] {message}")
+    return {"ok": True, "task_id": task_id, "task_updated": changed}
+
+
+@board_delta
+def handoff(agent_id: str, summary: str, next_steps: str, blockers: str = "") -> dict:
+    """Stop cleanly: releases all your leases, marks you inactive, attaches your summary and
+    next steps to your claimed task so the next agent resumes with your context."""
+    with db.tx() as conn:
+        room, _ = _room_of(conn, agent_id)
+        return ledger.handoff(conn, room, agent_id, summary, next_steps, blockers)
+
+
+@board_delta
+def wait_for_event(agent_id: str, timeout_s: float = 30) -> dict:
+    """Block (max 60s) until something happens in the room. New events arrive in board_delta."""
+    fresh = ledger.wait_for_event(agent_id, timeout_s)
+    return {"timed_out": not fresh}
+
+
+TOOLS = {f.__name__: f for f in (
+    join_room, get_board, create_task, claim_task, acquire_lease, release_lease,
+    list_files, read_file, write_file, run, log_work, post_update, handoff, wait_for_event,
+)}
+
+mcp = FastMCP(
+    "agenthub",
+    instructions="Shared agent workspace. Call join_room first; every response carries "
+                 "board_delta with what other agents did since your last call.",
+)
+for _fn in TOOLS.values():
+    mcp.tool(_fn)
+
+
 # --------------------------------------------------------------------------
-# plain HTTP: health + admin reset
+# plain HTTP: /tools/{name} shim (same handlers), health, admin reset
 # --------------------------------------------------------------------------
 
+async def tool_http(request: Request) -> JSONResponse:
+    fn = TOOLS.get(request.path_params["name"])
+    if fn is None:
+        return JSONResponse({"error": "no such tool"}, status_code=404)
+    args = await request.json() if await request.body() else {}
+    import anyio
+    try:
+        result = await anyio.to_thread.run_sync(lambda: fn(**args))
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse(result)
+
+
 async def health(_: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "tools": sorted(t.name for t in await mcp.list_tools())})
+    return JSONResponse({"ok": True, "tools": sorted(TOOLS)})
 
 
 async def admin_reset(request: Request) -> JSONResponse:
@@ -186,10 +309,9 @@ async def admin_reset(request: Request) -> JSONResponse:
         r = conn.execute("SELECT sandbox_id FROM rooms WHERE id=?", (room,)).fetchone()
     if r and r["sandbox_id"]:
         try:
-            sandbox.get(r["sandbox_id"]).delete()
+            sandbox.destroy(r["sandbox_id"])
         except Exception:
             pass  # best effort; a stale sandbox is harmless
-        sandbox._cache.pop(r["sandbox_id"], None)
     with db.tx() as conn:
         conn.execute("DELETE FROM worklog WHERE task_id IN (SELECT id FROM tasks WHERE room=?)", (room,))
         for table in ("tasks", "leases", "events", "agents", "rooms"):
@@ -202,6 +324,7 @@ mcp_app = mcp.http_app(path="/mcp", stateless_http=True, allowed_hosts=["*"])
 app = Starlette(
     routes=[
         Route("/health", health),
+        Route("/tools/{name}", tool_http, methods=["POST"]),
         Route("/admin/reset/{room}", admin_reset, methods=["POST"]),
         Mount("/", app=mcp_app),  # serves /mcp exactly, no trailing-slash redirect
     ],

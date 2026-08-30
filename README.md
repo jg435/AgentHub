@@ -5,7 +5,26 @@ task ledger, not git branches. See `SPEC.md`.
 
 **Phase 0** — `join_room` + `get_board`, SQLite schema, deployable app.
 **Phase 1** — Daytona sandbox per room seeded from `seed/`; `list_files`, `read_file`,
-`write_file` (no lease check yet), `run`.
+`write_file`, `run`.
+**Phase 2** — tasks, atomic claims, leases (300s TTL, lazy expiry), lease-enforced
+`write_file`, worklog, resume briefing, heartbeat reaping (180s), `handoff`,
+`wait_for_event`, `log_work`, `post_update`.
+
+## Tests
+
+```sh
+uv run pytest -q                       # S1–S11 + extras, fake sandbox, ~6s
+RUN_DAYTONA=1 AGENTHUB_URL=http://localhost:8000 uv run pytest -q -k s12   # real Daytona
+```
+
+`tests/conftest.py` starts a server on a free port with a fresh SQLite file and
+`SANDBOX_FAKE=1`. `sim/agent.py` is the scripted agent; it calls `POST /tools/{name}`,
+which dispatches to the *same* handler functions the MCP tools use.
+
+## Demo
+
+Launch each agent from `demo/` — it holds the `CLAUDE.md` / `AGENTS.md` protocol
+file (also seeded into the sandbox). Room code: `demo`.
 
 ## Run locally
 

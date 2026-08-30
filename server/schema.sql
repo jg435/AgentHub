@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   status      TEXT NOT NULL,             -- open | claimed | done | blocked
   claimed_by  TEXT,                      -- agent id
   created_at  REAL,
-  updated_at  REAL
+  updated_at  REAL,
+  suggested_files TEXT                   -- JSON list; used to suggest alternatives in lease denials
 );
 
 CREATE TABLE IF NOT EXISTS worklog (
