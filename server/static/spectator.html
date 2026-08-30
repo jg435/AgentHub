@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentHub — shared workspace</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0b0e14; --panel:#141924; --line:#232a38; --fg:#e8ecf3; --dim:#8a94a8;
+          --open:#8a94a8; --claimed:#f5b83d; --done:#3ecf8e; --blocked:#ff5d5d; --accent:#6ea8ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font: 22px/1.35 -apple-system, "Segoe UI", Inter, Helvetica, sans-serif; }
+  header { display:flex; align-items:baseline; gap:24px; padding:18px 28px; border-bottom:2px solid var(--line); }
+  header h1 { margin:0; font-size:34px; letter-spacing:.5px; }
+  header .room { color:var(--accent); font-weight:700; }
+  header .brief { color:var(--dim); font-size:20px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  header .agents { display:flex; gap:12px; }
+  .agent { padding:4px 12px; border-radius:999px; border:2px solid var(--line); font-size:19px; }
+  .agent.on { border-color:var(--done); }
+  .agent.off { color:var(--dim); text-decoration: line-through; }
+  main { display:grid; grid-template-columns: 1.15fr 1fr; grid-template-rows: auto auto 1fr; gap:18px; padding:18px 28px; height: calc(100vh - 82px); }
+  section { background:var(--panel); border:2px solid var(--line); border-radius:14px; padding:16px 20px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+  h2 { margin:0 0 12px; font-size:18px; letter-spacing:2px; text-transform:uppercase; color:var(--dim); }
+  #tasks { grid-row: 1 / span 3; grid-column: 1; }
+  #leases { grid-column: 2; grid-row: 1; }
+  #lastrun { grid-column: 2; grid-row: 2; }
+  #feed { grid-column: 2; grid-row: 3; }
+  .cols { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; flex:1; min-height:0; }
+  .col h3 { margin:0 0 8px; font-size:17px; letter-spacing:1.5px; text-transform:uppercase; }
+  .col.open h3 { color:var(--open);} .col.claimed h3{color:var(--claimed);} .col.done h3{color:var(--done);} .col.blocked h3{color:var(--blocked);}
+  .card { background:var(--bg); border-left:6px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; font-size:20px; }
+  .col.open .card{border-color:var(--open);} .col.claimed .card{border-color:var(--claimed);} .col.done .card{border-color:var(--done);} .col.blocked .card{border-color:var(--blocked);}
+  .card .who { color:var(--claimed); font-size:18px; margin-top:4px; }
+  .card .id { color:var(--dim); margin-right:6px; }
+  table { width:100%; border-collapse:collapse; font-size:20px; }
+  th { text-align:left; color:var(--dim); font-weight:600; font-size:16px; letter-spacing:1px; padding:4px 6px; }
+  td { padding:6px; border-top:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:0; }
+  td.path { font-family: ui-monospace, Menlo, monospace; color:var(--accent); }
+  td.ttl { font-variant-numeric: tabular-nums; text-align:right; }
+  td.ttl.low { color:var(--blocked); }
+  #feed { grid-column: 2; }
+  #feed ul { list-style:none; margin:0; padding:0; overflow:hidden; flex:1; }
+  #feed li { display:flex; gap:12px; padding:5px 0; border-top:1px solid var(--line); font-size:19px; align-items:baseline; }
+  #feed li:first-child { border-top:0; }
+  #feed .ts { color:var(--dim); font-variant-numeric: tabular-nums; font-size:16px; min-width:74px; }
+  #feed .kind { min-width:150px; font-weight:700; }
+  #feed .body { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#c9d1de; }
+  .k-lease_denied .kind, .k-task_reverted .kind { color:var(--blocked); }
+  .k-lease_granted .kind, .k-task_claimed .kind { color:var(--claimed); }
+  .k-task_done .kind, .k-joined .kind { color:var(--done); }
+  .k-file_written .kind, .k-command_run .kind, .k-handoff .kind { color:var(--accent); }
+  #lastrun .result { display:flex; gap:16px; align-items:center; font-size:22px; }
+  #lastrun .badge { font-weight:800; font-size:26px; padding:6px 16px; border-radius:10px; background:var(--line); }
+  #lastrun .badge.ok { background:var(--done); color:#04261a; }
+  #lastrun .badge.fail { background:var(--blocked); color:#2b0000; }
+  #lastrun pre { margin:10px 0 0; font: 17px/1.3 ui-monospace, Menlo, monospace; color:#c9d1de; white-space:pre-wrap; max-height:120px; overflow:hidden; }
+  .empty { color:var(--dim); font-style:italic; }
+  #status { position:fixed; right:16px; bottom:10px; color:var(--dim); font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentHub <span class="room" id="room"></span></h1>
+  <div class="brief" id="brief"></div>
+  <div class="agents" id="agents"></div>
+</header>
+<main>
+  <section id="tasks"><h2>Tasks</h2><div class="cols" id="cols"></div></section>
+  <section id="leases"><h2>Leases</h2><table><thead><tr><th>Path</th><th>Holder</th><th>Task</th><th style="text-align:right">Expires</th></tr></thead><tbody id="leaserows"></tbody></table></section>
+  <section id="lastrun"><h2>Last test run</h2><div id="runbody" class="empty">nothing run yet</div></section>
+  <section id="feed"><h2>Events</h2><ul id="events"></ul></section>
+</main>
+<div id="status"></div>
+<script>
+const room = (location.pathname.match(/\/ui\/([^/]+)/) || [])[1] || new URLSearchParams(location.search).get('room') || 'demo';
+document.getElementById('room').textContent = '/ ' + room;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const hms = ts => new Date(ts * 1000).toLocaleTimeString([], {hour12:false});
+let skew = 0;
+
+function describe(e) {
+  const p = e.payload || {}, who = e.agent_name || (e.agent_id ? e.agent_id.slice(0,8) : 'system');
+  switch (e.kind) {
+    case 'joined': return `${who} joined (${p.kind || ''})`;
+    case 'left': return `${who} went silent — reaped`;
+    case 'task_created': return `#${p.task_id} "${p.title}"`;
+    case 'task_claimed': return `${who} claimed #${p.task_id} "${p.title}"`;
+    case 'task_done': return `${who} finished #${p.task_id} "${p.title}"`;
+    case 'task_reverted': return `#${p.task_id} back to open (${p.reason})`;
+    case 'lease_granted': return `${who} → ${p.path}`;
+    case 'lease_denied': return `${who} denied ${p.path}` + (p.held_by ? ` — held by ${p.held_by}` : ' — no lease');
+    case 'lease_released': return `${who} released ${p.path}`;
+    case 'lease_expired': return `${p.path} expired`;
+    case 'file_written': return `${who} wrote ${p.path} (${p.bytes} B)`;
+    case 'command_run': return `${who}: ${p.command} → exit ${p.exit_code}`;
+    case 'update_posted': return `${who} [${p.kind || p.status}] ${p.message}`;
+    case 'handoff': return `${who} handed off: ${p.next_steps}`;
+    default: return JSON.stringify(p);
+  }
+}
+
+function render(d) {
+  skew = d.now - Date.now()/1000;
+  document.getElementById('brief').textContent = d.brief || '';
+  document.getElementById('agents').innerHTML = d.agents.map(a =>
+    `<span class="agent ${a.active ? 'on' : 'off'}">${esc(a.name)}</span>`).join('') || '<span class="empty">no agents yet</span>';
+
+  const by = {open:[], claimed:[], done:[], blocked:[]};
+  d.tasks.forEach(t => (by[t.status] || by.open).push(t));
+  document.getElementById('cols').innerHTML = ['open','claimed','done','blocked'].map(s => `
+    <div class="col ${s}"><h3>${s} · ${by[s].length}</h3>${by[s].map(t => `
+      <div class="card"><span class="id">#${t.id}</span>${esc(t.title)}
+        ${t.claimed_by_name ? `<div class="who">${esc(t.claimed_by_name)}</div>` : ''}</div>`).join('')}</div>`).join('');
+
+  const now = Date.now()/1000 + skew;
+  const taskTitle = id => { const t = d.tasks.find(x => x.id === id); return t ? `#${t.id} ${t.title}` : ''; };
+  document.getElementById('leaserows').innerHTML = d.leases.length ? d.leases.map(l => {
+    const left = Math.max(0, Math.round(l.expires_at - now));
+    return `<tr><td class="path">${esc(l.path)}</td><td>${esc(l.holder_name || l.agent_id.slice(0,8))}</td>
+      <td>${esc(taskTitle(l.task_id))}</td><td class="ttl ${left < 60 ? 'low' : ''}">${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}</td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="empty">no live leases</td></tr>';
+
+  const r = d.last_run;
+  document.getElementById('runbody').innerHTML = r ? `
+    <div class="result"><span class="badge ${r.payload.exit_code === 0 ? 'ok' : 'fail'}">exit ${r.payload.exit_code}</span>
+      <span><b>${esc(r.agent_name || '')}</b> ran <code>${esc(r.payload.command)}</code> at ${hms(r.ts)}</span></div>
+    <pre>${esc(((r.payload.stdout || '') + (r.payload.stderr || '')).split('\n').map(s => s.trim()).filter(Boolean).slice(-2).join('\n'))}</pre>` : '<span class="empty">nothing run yet</span>';
+
+  document.getElementById('events').innerHTML = [...d.events].reverse().slice(0, 18).map(e =>
+    `<li class="k-${e.kind}"><span class="ts">${hms(e.ts)}</span><span class="kind">${e.kind.replace('_',' ')}</span><span class="body">${esc(describe(e))}</span></li>`).join('')
+    || '<li class="empty">waiting for the first agent…</li>';
+}
+
+async function tick() {
+  try {
+    const res = await fetch(`/api/board/${encodeURIComponent(room)}`, {cache:'no-store'});
+    if (res.status === 404) { document.getElementById('status').textContent = `room "${room}" does not exist yet`; return; }
+    render(await res.json());
+    document.getElementById('status').textContent = 'live · ' + new Date().toLocaleTimeString([], {hour12:false});
+  } catch (e) { document.getElementById('status').textContent = 'disconnected: ' + e.message; }
+}
+tick(); setInterval(tick, 500);
+</script>
+</body>
+</html>

@@ -9,6 +9,8 @@ task ledger, not git branches. See `SPEC.md`.
 **Phase 2** — tasks, atomic claims, leases (300s TTL, lazy expiry), lease-enforced
 `write_file`, worklog, resume briefing, heartbeat reaping (180s), `handoff`,
 `wait_for_event`, `log_work`, `post_update`.
+**Phase 3** — spectator UI at `/ui/{room}` polling `GET /api/board/{room}` every 500 ms.
+New rooms are seeded with the tasks in `seed/tasks.json` (`SEED_TASKS=0` disables).
 
 ## Tests
 

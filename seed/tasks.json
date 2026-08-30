@@ -1,0 +1,17 @@
+[
+  {
+    "title": "Add PATCH /todos/{id} to toggle done",
+    "description": "Add a PATCH endpoint in app/main.py that flips the todo's `done` flag and returns the todo (404 if missing). Add a test in tests/test_todos.py. Run pytest -q.",
+    "suggested_files": ["app/main.py", "tests/test_todos.py"]
+  },
+  {
+    "title": "Reject empty todo titles on POST /todos",
+    "description": "POST /todos with a blank or whitespace-only title must return 422. Validate in the TodoIn model in app/main.py. Add a test in tests/test_todos.py. Run pytest -q.",
+    "suggested_files": ["app/main.py", "tests/test_todos.py"]
+  },
+  {
+    "title": "Write tests for GET /health",
+    "description": "Add tests/test_health.py covering status code and body of GET /health. Touches tests/ only. Run pytest -q.",
+    "suggested_files": ["tests/test_health.py"]
+  }
+]

@@ -1,6 +1,8 @@
 """Shared agent workspace — MCP server + plain-HTTP shim for the simulator."""
+import json
 import os
 import uuid
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -9,7 +11,7 @@ load_dotenv()
 from fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 
 from . import db, ledger, sandbox
@@ -25,6 +27,14 @@ PROTOCOL = (
     "you stop. Every response includes board_delta: read it, it is what the others did."
 )
 DEFAULT_BRIEF = "FastAPI todo service at the workspace root (app/main.py). Tests: pytest -q"
+
+
+def _seed_tasks() -> list[dict]:
+    """Tasks pre-created in every new room (seed/tasks.json). SEED_TASKS=0 disables."""
+    if os.environ.get("SEED_TASKS", "1") == "0":
+        return []
+    p = sandbox.SEED_DIR / "tasks.json"
+    return json.loads(p.read_text()) if p.exists() else []
 
 
 def _room_of(conn, agent_id: str) -> tuple[str, str | None]:
@@ -61,6 +71,9 @@ def join_room(room: str, agent_name: str, agent_kind: str) -> dict:
             raise ValueError(f"could not create the room's sandbox: {e}") from e
         with db.tx() as conn:
             conn.execute("UPDATE rooms SET sandbox_id=? WHERE id=?", (sandbox_id, room))
+            for st in _seed_tasks():
+                ledger.create_task(conn, room, None, st["title"], st.get("description", ""),
+                                   st.get("suggested_files", []))
     with db.tx() as conn:
         r = conn.execute("SELECT brief FROM rooms WHERE id=?", (room,)).fetchone()
         if r is None:
@@ -302,6 +315,36 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "tools": sorted(TOOLS)})
 
 
+STATIC = Path(__file__).with_name("static")
+
+
+async def api_board(request: Request) -> JSONResponse:
+    """Spectator feed. Read-only; also triggers reaping so the display is truthful."""
+    room = request.path_params["room"].strip().lower()
+    with db.tx() as conn:
+        r = conn.execute("SELECT brief, sandbox_id FROM rooms WHERE id=?", (room,)).fetchone()
+        if r is None:
+            return JSONResponse({"error": "no such room", "room": room}, status_code=404)
+        reap(conn, room)
+        expire_leases(conn, room)
+        b = board(conn, room)
+        names = {a["id"]: a["name"] for a in b["agents"]}
+        for t in b["tasks"]:
+            t["claimed_by_name"] = names.get(t["claimed_by"])
+        for l in b["leases"]:
+            l["holder_name"] = names.get(l["agent_id"])
+        events = recent_events(conn, room, 60)
+        for e in events:
+            e["agent_name"] = names.get(e["agent_id"])
+        last_run = next((e for e in reversed(events) if e["kind"] == "command_run"), None)
+    return JSONResponse({"room": room, "brief": r["brief"], "sandbox_id": r["sandbox_id"], "now": db.now(),
+                         **b, "events": events, "last_run": last_run})
+
+
+async def ui(request: Request) -> HTMLResponse:
+    return HTMLResponse((STATIC / "spectator.html").read_text())
+
+
 async def admin_reset(request: Request) -> JSONResponse:
     """Wipe a room's ledger and destroy its sandbox (next join re-seeds a fresh one)."""
     room = request.path_params["room"].strip().lower()
@@ -324,6 +367,9 @@ mcp_app = mcp.http_app(path="/mcp", stateless_http=True, allowed_hosts=["*"])
 app = Starlette(
     routes=[
         Route("/health", health),
+        Route("/api/board/{room}", api_board),
+        Route("/ui/{room}", ui),
+        Route("/", ui),
         Route("/tools/{name}", tool_http, methods=["POST"]),
         Route("/admin/reset/{room}", admin_reset, methods=["POST"]),
         Mount("/", app=mcp_app),  # serves /mcp exactly, no trailing-slash redirect
