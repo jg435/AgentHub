@@ -3,6 +3,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev --no-install-project
 COPY server ./server
+COPY seed ./seed
 ENV PATH="/app/.venv/bin:$PATH" DB_PATH=/data/agenthub.db PORT=8000
 VOLUME ["/data"]
 EXPOSE 8000
