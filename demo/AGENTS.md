@@ -14,7 +14,8 @@ or shell tools.
 5. Verify with `run` — run the tests (`pytest -q`). Never assume they pass.
 6. Call log_work as you learn things. The next agent inherits your notes, so write
    them for someone who wasn't here.
-7. Call post_update when you finish (kind=done) or are blocked (kind=blocked).
+7. When tests pass: release_lease, then commit_and_push with a clear message, then
+   post_update kind=done. If you are blocked, post_update kind=blocked.
 8. If you are running low on context, call handoff with a summary and next steps
    before you stop.
 

@@ -9,7 +9,7 @@ from sim.agent import ToolError
 
 ALL_TOOLS = ["join_room", "get_board", "create_task", "claim_task", "acquire_lease", "release_lease",
              "list_files", "read_file", "write_file", "run", "log_work", "post_update", "handoff",
-             "wait_for_event"]
+             "wait_for_event", "commit_and_push"]
 
 
 def _task(agent, title="task", files=None):
@@ -80,7 +80,10 @@ def test_s10_board_delta_on_every_tool(agents, room, server, tool):
         "post_update": dict(kind="note", message="m"),
         "handoff": dict(summary="s", next_steps="n", blockers=""),
         "wait_for_event": dict(timeout_s=0),
+        "commit_and_push": dict(message="s10"),
     }[tool]
+    if tool == "commit_and_push":
+        b.call("release_lease", paths=["x.py"])
     a.call("post_update", kind="note", message="ping")  # something for B to learn about
     resp = b.call(tool, **args)
     assert "board_delta" in resp, tool
@@ -149,6 +152,19 @@ def test_lease_requires_claimed_task(agents):
     a.call("claim_task", task_id=tid)
     assert a.call("acquire_lease", paths=["x.py"], task_id=tid)["granted"]
     assert a.call("get_board")["leases"] != []
+
+
+def test_commit_and_push_rules(agents):
+    a, b = agents("A"), agents("B")
+    ta, tb = _claimed(a), _claimed(b)
+    a.call("acquire_lease", paths=["app/main.py"], task_id=ta)
+    b.call("acquire_lease", paths=["tests/test_todos.py"], task_id=tb)
+    with pytest.raises(ToolError, match="release your leases"):
+        a.call("commit_and_push", message="too early")
+    a.call("release_lease", paths=["app/main.py"])
+    r = a.call("commit_and_push", message="ship it")
+    assert r["pushed"] and r["excluded_leased_by_others"] == ["tests/test_todos.py"]
+    assert any(e["kind"] == "pushed" for e in b.call("get_board")["board_delta"])
 
 
 def test_list_files_is_two_levels_deep(agents):

@@ -103,9 +103,13 @@ def create_for_room(room: str) -> str:
         ]
         sb.fs.upload_files(files, timeout=120)
         r = sb.process.exec(
-            f"cd {WORKSPACE} && pip install -q -r requirements.txt", timeout=240)
+            f"cd {WORKSPACE} && pip install -q -r requirements.txt && "
+            f"(command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git >/dev/null)) && "
+            f"git config --global user.email agent@agenthub.local && git config --global user.name 'AgentHub room' && "
+            f"git config --global init.defaultBranch main && git config --global --add safe.directory {WORKSPACE}",
+            timeout=300)
         if r.exit_code != 0:
-            raise SandboxError(f"seed dependency install failed (exit {r.exit_code}): {r.result[-2000:]}")
+            raise SandboxError(f"seed setup failed (exit {r.exit_code}): {r.result[-2000:]}")
     except SandboxError:
         raise
     except Exception as e:
@@ -202,6 +206,40 @@ def write_file(sandbox_id: str | None, rel_path: str, content: str) -> int:
     except Exception as e:
         raise SandboxError(f"write_file {rel_path!r} failed: {e}") from e
     return len(content)
+
+
+def commit_and_push(sandbox_id: str | None, message: str, exclude: list[str]) -> dict:
+    """git add (minus `exclude`), commit, push HEAD:<GIT_BRANCH> to GIT_REMOTE_URL.
+    Returns {sha, branch, pushed, summary}. Raises SandboxError with a directive message."""
+    remote = os.environ.get("GIT_REMOTE_URL")
+    branch = os.environ.get("GIT_BRANCH", "main")
+    if not remote:
+        raise SandboxError("GIT_REMOTE_URL is not configured on the server, so there is nowhere to push")
+    if FAKE:
+        sb = get(sandbox_id)
+        return {"sha": "fake0000", "branch": branch, "pushed": True,
+                "summary": f"{len(sb.files)} files (fake sandbox)"}
+    q = shlex.quote
+    excl = " ".join(f"':!{p}'" for p in exclude)
+    script = (
+        f"cd {WORKSPACE} && "
+        f"( [ -d .git ] || git init -q ) && "
+        f"( git remote get-url origin >/dev/null 2>&1 && git remote set-url origin {q(remote)} || git remote add origin {q(remote)} ) && "
+        f"git add -A -- . {excl} && "
+        f"( git diff --cached --quiet && echo NOTHING_TO_COMMIT || git commit -q -m {q(message)} ) && "
+        f"git rev-parse --short HEAD && git push -q origin HEAD:{q(branch)} 2>&1 && echo PUSH_OK"
+    )
+    r = run(sandbox_id, script)
+    out = (r["stdout"] + "\n" + r["stderr"]).replace(remote, "<remote>")
+    if "NOTHING_TO_COMMIT" in out and "PUSH_OK" not in out and r["exit_code"] != 0:
+        raise SandboxError("nothing to commit and push failed: " + out[-800:])
+    if r["exit_code"] != 0 or "PUSH_OK" not in out:
+        hint = (" The remote has moved: run(\"git pull --rebase origin " + branch + "\") then retry."
+                if "rejected" in out or "fetch first" in out else "")
+        raise SandboxError("push failed: " + out[-800:].strip() + hint)
+    sha = next((line.strip() for line in out.splitlines() if len(line.strip()) in (7, 8) and line.strip().isalnum()), "?")
+    return {"sha": sha, "branch": branch, "pushed": True,
+            "summary": "nothing new to commit; pushed existing HEAD" if "NOTHING_TO_COMMIT" in out else "committed and pushed"}
 
 
 def run(sandbox_id: str | None, command: str) -> dict:

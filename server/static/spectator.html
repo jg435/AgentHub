@@ -46,7 +46,7 @@
   #feed .body { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#c9d1de; }
   .k-lease_denied .kind, .k-task_reverted .kind { color:var(--blocked); }
   .k-lease_granted .kind, .k-task_claimed .kind { color:var(--claimed); }
-  .k-task_done .kind, .k-joined .kind { color:var(--done); }
+  .k-task_done .kind, .k-joined .kind, .k-pushed .kind { color:var(--done); }
   .k-file_written .kind, .k-command_run .kind, .k-handoff .kind { color:var(--accent); }
   #lastrun .result { display:flex; gap:16px; align-items:center; font-size:22px; }
   #lastrun .badge { font-weight:800; font-size:26px; padding:6px 16px; border-radius:10px; background:var(--line); }
@@ -94,6 +94,7 @@ function describe(e) {
     case 'command_run': return `${who}: ${p.command} → exit ${p.exit_code}`;
     case 'update_posted': return `${who} [${p.kind || p.status}] ${p.message}`;
     case 'handoff': return `${who} handed off: ${p.next_steps}`;
+    case 'pushed': return `${who} pushed ${p.sha} to ${p.branch}: ${p.message}`;
     default: return JSON.stringify(p);
   }
 }

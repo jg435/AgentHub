@@ -232,6 +232,36 @@ def run(agent_id: str, command: str) -> dict:
 
 
 @board_delta
+def commit_and_push(agent_id: str, message: str) -> dict:
+    """Commit the workspace and push it to the room's git remote. Release your leases first.
+    Files currently leased by OTHER agents are left out of the commit (their work is in
+    progress). Returns the commit sha. If the remote moved, run `git pull --rebase` and retry."""
+    if not message.strip():
+        raise ValueError("message is required")
+    with db.tx() as conn:
+        room, sandbox_id = _room_of(conn, agent_id)
+        expire_leases(conn, room)
+        mine = [r["path"] for r in conn.execute(
+            "SELECT path FROM leases WHERE room=? AND agent_id=?", (room, agent_id)).fetchall()]
+        if mine:
+            raise ValueError("DENIED: release your leases before pushing (you still hold: "
+                             + ", ".join(mine) + "). Call release_lease, then commit_and_push again.")
+        others = [r["path"] for r in conn.execute(
+            "SELECT path FROM leases WHERE room=? AND agent_id!=?", (room, agent_id)).fetchall()]
+    try:
+        result = sandbox.commit_and_push(sandbox_id, message, exclude=others)
+    except sandbox.SandboxError as e:
+        raise ValueError(str(e)) from e
+    with db.tx() as conn:
+        db.emit(conn, room, agent_id, "pushed", {"sha": result["sha"], "branch": result["branch"],
+                                                 "message": message, "excluded": others})
+        tid = ledger.claimed_task_id(conn, room, agent_id)
+        if tid:
+            ledger.add_worklog(conn, tid, agent_id, f"pushed {result['sha']} to {result['branch']}: {message}")
+    return {**result, "excluded_leased_by_others": others}
+
+
+@board_delta
 def log_work(agent_id: str, task_id: int, note: str) -> dict:
     """Append a note to a task's worklog. Write it for someone who wasn't here."""
     with db.tx() as conn:
@@ -283,6 +313,7 @@ def wait_for_event(agent_id: str, timeout_s: float = 30) -> dict:
 TOOLS = {f.__name__: f for f in (
     join_room, get_board, create_task, claim_task, acquire_lease, release_lease,
     list_files, read_file, write_file, run, log_work, post_update, handoff, wait_for_event,
+    commit_and_push,
 )}
 
 mcp = FastMCP(

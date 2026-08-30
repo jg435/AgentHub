@@ -28,7 +28,7 @@ def _free_port() -> int:
 def server(tmp_path_factory):
     db_path = tmp_path_factory.mktemp("db") / "test.db"
     port = _free_port()
-    env = {**os.environ, "DB_PATH": str(db_path), "SANDBOX_FAKE": "1", "SEED_TASKS": "0", "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "DB_PATH": str(db_path), "SANDBOX_FAKE": "1", "SEED_TASKS": "0", "GIT_REMOTE_URL": "fake://remote", "PYTHONUNBUFFERED": "1"}
     env.pop("DAYTONA_API_KEY", None)
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "server.app:app", "--port", str(port), "--log-level", "warning"],
