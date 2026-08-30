@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from fastmcp import FastMCP
+
+from .config import APP_NAME, DATABASE_PATH
+from .ledger import Ledger
+from .service import WorkspaceService
+
+
+def create_app(service: WorkspaceService | None = None) -> FastAPI:
+    ledger = service.ledger if service else Ledger(DATABASE_PATH)
+    workspace = service or WorkspaceService(ledger)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        ledger.initialize()
+        yield
+
+    app = FastAPI(title=APP_NAME, lifespan=lifespan)
+    mcp = FastMCP(APP_NAME)
+
+    @mcp.tool()
+    def join_room(room: str, agent_name: str, agent_kind: str) -> dict[str, Any]:
+        """Join a shared room, creating its Daytona workspace on the first join."""
+        return workspace.join_room(room, agent_name, agent_kind)
+
+    @mcp.tool()
+    def get_board(agent_id: str) -> dict[str, Any]:
+        """Read the shared task board, leases, agents, and recent events."""
+        return workspace.get_board(agent_id)
+
+    @mcp.tool()
+    def list_files(agent_id: str, dir: str = ".") -> dict[str, Any]:
+        """List files in the shared Daytona workspace."""
+        return workspace.list_files(agent_id, dir)
+
+    @mcp.tool()
+    def read_file(agent_id: str, path: str) -> dict[str, Any]:
+        """Read a UTF-8 file from the shared Daytona workspace."""
+        return workspace.read_file(agent_id, path)
+
+    @mcp.tool()
+    def write_file(agent_id: str, path: str, content: str) -> dict[str, Any]:
+        """Write a UTF-8 file to the shared workspace. Leases begin in Phase 2."""
+        return workspace.write_file(agent_id, path, content)
+
+    @mcp.tool()
+    def run(agent_id: str, command: str) -> dict[str, Any]:
+        """Run a command in the room's shared Daytona workspace."""
+        return workspace.run(agent_id, command)
+
+    @mcp.tool()
+    def create_task(agent_id: str, title: str, description: str = "",
+                    suggested_files: list[str] | None = None) -> dict[str, Any]:
+        """Create an open task on the shared board."""
+        return workspace.create_task(agent_id, title, description, suggested_files)
+
+    @mcp.tool()
+    def claim_task(agent_id: str, task_id: int) -> dict[str, Any]:
+        """Atomically claim an open task."""
+        return workspace.claim_task(agent_id, task_id)
+
+    @mcp.tool()
+    def log_work(agent_id: str, task_id: int, note: str) -> dict[str, Any]:
+        """Append inherited context to a task's worklog."""
+        return workspace.log_work(agent_id, task_id, note)
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/")
+    def index() -> dict[str, str]:
+        return {"name": APP_NAME, "mcp": "/mcp", "health": "/healthz"}
+
+    # FastMCP's ASGI app uses streamable HTTP; mount it where remote clients expect it.
+    app.mount("/mcp", mcp.http_app(transport="streamable-http"))
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    main()
