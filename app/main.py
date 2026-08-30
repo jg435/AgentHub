@@ -69,6 +69,31 @@ def create_app(service: WorkspaceService | None = None) -> FastAPI:
         """Append inherited context to a task's worklog."""
         return workspace.log_work(agent_id, task_id, note)
 
+    @mcp.tool()
+    def acquire_lease(agent_id: str, paths: list[str], task_id: int) -> dict[str, Any]:
+        """Atomically acquire all requested file leases for a claimed task."""
+        return workspace.acquire_lease(agent_id, paths, task_id)
+
+    @mcp.tool()
+    def release_lease(agent_id: str, paths: list[str]) -> dict[str, Any]:
+        """Release leases held by this agent."""
+        return workspace.release_lease(agent_id, paths)
+
+    @mcp.tool()
+    def post_update(agent_id: str, kind: str, message: str) -> dict[str, Any]:
+        """Post a structured note, blocked update, or done update."""
+        return workspace.post_update(agent_id, kind, message)
+
+    @mcp.tool()
+    def handoff(agent_id: str, summary: str, next_steps: str, blockers: str = "") -> dict[str, Any]:
+        """Release leases and leave context for a successor."""
+        return workspace.handoff(agent_id, summary, next_steps, blockers)
+
+    @mcp.tool()
+    def wait_for_event(agent_id: str, timeout_s: int = 60) -> dict[str, Any]:
+        """Wait for new room events for up to 60 seconds."""
+        return workspace.wait_for_event(agent_id, timeout_s)
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}

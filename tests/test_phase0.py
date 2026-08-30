@@ -106,6 +106,9 @@ def test_shared_sandbox_file_operations_are_visible_to_another_agent(tmp_path: P
     second = service.join_room("amber-fox", "Sam", "codex")
 
     assert service.read_file(first["agent_id"], "README.md")["content"] == "seed project"
+    task_id = service.create_task(first["agent_id"], "Write shared note")["task_id"]
+    assert service.claim_task(first["agent_id"], task_id)["granted"]
+    assert service.acquire_lease(first["agent_id"], ["notes.txt"], task_id)["granted"]
     written = service.write_file(first["agent_id"], "notes.txt", "shared change")
     observed = service.read_file(second["agent_id"], "notes.txt")
     result = service.run(second["agent_id"], "pytest -q")
