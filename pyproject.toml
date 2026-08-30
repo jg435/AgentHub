@@ -1,0 +1,9 @@
+[project]
+name = "agenthub"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.10",
+    "starlette>=1.6.0",
+    "uvicorn[standard]>=0.52.4",
+]
