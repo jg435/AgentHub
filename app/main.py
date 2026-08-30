@@ -3,7 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from fastmcp import FastMCP
 
 from .config import APP_NAME, DATABASE_PATH
@@ -97,6 +98,15 @@ def create_app(service: WorkspaceService | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/board/{room}")
+    def spectator_data(room: str) -> dict[str, Any]:
+        """Read-only board data for the spectator display."""
+        return workspace.spectator_board(room)
+
+    @app.get("/spectator/{room}", response_class=HTMLResponse)
+    def spectator(room: str) -> str:
+        return f'''<!doctype html><title>AgentHub · {room}</title><style>body{{font:18px system-ui;background:#10131a;color:#eef;margin:0;padding:28px}}h1{{margin:0 0 18px}}main{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}section{{background:#1a2030;padding:16px;border-radius:12px}}pre{{white-space:pre-wrap;max-height:55vh;overflow:auto}}.open{{color:#8dd}}.claimed{{color:#fd8}}.done{{color:#8f8}}</style><h1>AgentHub · {room}</h1><main><section><h2>Tasks</h2><div id="tasks"></div></section><section><h2>Leases</h2><div id="leases"></div><h2>Last command</h2><pre id="command">None</pre></section><section style="grid-column:1/-1"><h2>Live event feed</h2><pre id="events"></pre></section></main><script>const esc=s=>String(s??'').replace(/[&<>]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[c]));async function refresh(){{let b=await fetch('/api/board/{room}').then(r=>r.json());tasks.innerHTML=b.tasks.map(t=>`<p class="${{t.status}}">#${{t.id}} · ${{esc(t.title)}} — <b>${{t.status}}</b></p>`).join('')||'No tasks';leases.innerHTML=b.leases.map(l=>`<p>${{esc(l.path)}} · expires ${{new Date(l.expires_at*1000).toLocaleTimeString()}}</p>`).join('')||'No active leases';command.textContent=b.last_command?JSON.stringify(b.last_command.payload,null,2):'None';events.textContent=b.recent_events.map(e=>`${{new Date(e.ts*1000).toLocaleTimeString()}}  ${{e.kind}}  ${{JSON.stringify(e.payload)}}`).join('\n')}}refresh();setInterval(refresh,500)</script>'''
 
     @app.get("/")
     def index() -> dict[str, str]:

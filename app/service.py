@@ -177,6 +177,16 @@ class WorkspaceService:
         board["recent_events"] = [self._event(row) for row in reversed(recent)]
         return board
 
+    def spectator_board(self, room: str) -> dict[str, Any]:
+        self.reap_inactive_agents(room)
+        board = self.ledger.board(room)
+        with self.ledger.connect() as db:
+            events = db.execute("SELECT * FROM events WHERE room=? ORDER BY id DESC LIMIT 80", (room,)).fetchall()
+        board["recent_events"] = [self._event(row) for row in reversed(events)]
+        commands = [event for event in board["recent_events"] if event["kind"] == "command_run"]
+        board["last_command"] = commands[-1] if commands else None
+        return board
+
     @with_board_delta
     def create_task(self, agent_id: str, title: str, description: str = "",
                     suggested_files: list[str] | None = None) -> dict[str, Any]:
